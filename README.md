@@ -1,6 +1,8 @@
 # LKM_Rootkit
 
 My attempt at a Kernel Module rootkit. This is heavy influenced by the Diamorphine (https://github.com/m0nad/Diamorphine) rootkit. Listens to signals and will perform actions based on signal number.  
+
+#### Features
 Rootkit will hide any file that matches the 'magic_prefix' -- currently 'rootkit'. This can be toggled with the '63' signals.
 ```
 kill -63 0
@@ -9,10 +11,6 @@ Rootkit will also change current user contest to uid=0, euid=0, suid=0, and fsui
 ```
 kill -64 0
 ```
-
-
-#### Features
-
 
 #### Requirements:
 During my testing on an Ubuntu 22-04, I needed to install gcc12  
