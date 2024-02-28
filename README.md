@@ -25,3 +25,8 @@ lsmod
 kill -63 0
 lsmod
 ```
+
+You can then remove the module by using the rmmod command. You will need to first unhide it or the system won't be able to see it to remove it.
+```
+sudo rmmod rootkit
+```
