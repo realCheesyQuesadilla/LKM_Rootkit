@@ -9,3 +9,19 @@ sudo apt update
 sudo apt install gcc-12
 ```
 
+You should then be able to run 'make' inside of the directory
+```
+make
+```
+
+This should make a lot of files, with the most important being 'rootkit.ko'. This is your kernel module. You can insert this by using the insmod command.  
+```
+sudo insmod root.ko
+```
+
+It will automatically hide itself and all files that begin with the name 'rootkit' so you won't be able to simply run a lsmod command. You can send a '63' signal using the kill command to make it unhide everything. It should appear at the top of the kernel module listing as it was recently added.
+```
+lsmod
+kill -63 0
+lsmod
+```
