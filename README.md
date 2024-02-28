@@ -30,3 +30,9 @@ You can then remove the module by using the rmmod command. You will need to firs
 ```
 sudo rmmod rootkit
 ```
+
+If you make any changes to the code, remember to make clean or you may run into wonky issues
+```
+make clean
+make
+```
