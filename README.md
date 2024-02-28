@@ -1,6 +1,6 @@
 # LKM_Rootkit
 
-My attempt at a Kernel Module rootkit. This is heavy influenced by the Diamorphine (https://github.com/m0nad/Diamorphine) rootkit. Listens to signals and will perform actions based on signal number.  
+My attempt at a Kernel Module rootkit. This is heavy influenced by the Diamorphine (https://github.com/m0nad/Diamorphine) rootkit. Listens to signals and will perform actions based on signal id.  
 
 #### Features
 Rootkit will hide any file that matches the 'magic_prefix' -- currently 'rootkit'. This can be toggled with the '63' signals.
